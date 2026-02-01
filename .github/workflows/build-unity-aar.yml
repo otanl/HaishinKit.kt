@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - unity-support
+    tags:
+      - 'unity-v*'
     paths:
       - 'unity/**'
       - 'haishinkit/**'
@@ -17,11 +19,14 @@ on:
       create_release:
         description: 'Create a release'
         type: boolean
-        default: false
+        default: true
       version:
         description: 'Release version (e.g., unity-v1.0.0)'
         required: false
         default: ''
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -69,8 +74,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: |
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true') ||
-      (github.event_name == 'push' && contains(github.event.head_commit.message, '[release]'))
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/unity-v'))
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -86,6 +91,8 @@ jobs:
         run: |
           if [ -n "${{ github.event.inputs.version }}" ]; then
             VERSION="${{ github.event.inputs.version }}"
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION="${{ github.ref_name }}"
           else
             # Generate version from date and commit
             VERSION="unity-v$(date +%Y%m%d)-$(echo ${{ github.sha }} | cut -c1-7)"
@@ -98,7 +105,7 @@ jobs:
           tag_name: ${{ steps.version.outputs.version }}
           name: Unity Support ${{ steps.version.outputs.version }}
           draft: false
-          prerelease: true
+          prerelease: false
           files: |
             artifacts/HaishinKitUnity.aar
             artifacts/haishinkit.aar
@@ -116,7 +123,7 @@ jobs:
             | `haishinkit.aar` | Core HaishinKit library |
             | `rtmp.aar` | RTMP protocol support |
 
-            ### Usage
+            ### Installation
 
             Copy all AAR files to your Unity project:
             ```

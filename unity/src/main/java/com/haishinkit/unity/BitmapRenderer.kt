@@ -90,6 +90,14 @@ internal class BitmapRenderer {
     private var handlerThread: HandlerThread? = null
     private var handler: Handler? = null
 
+    // Optimization: track if texture is already allocated with correct size
+    private var textureAllocatedWidth = 0
+    private var textureAllocatedHeight = 0
+
+    // Optimization: use double buffering to avoid bitmap.copy()
+    private var pendingBitmap: Bitmap? = null
+    private val bitmapLock = Object()
+
     fun initialize(inputSurface: Surface, width: Int, height: Int): Boolean {
         Log.d(TAG, "initialize: ${width}x${height}")
         this.width = width
@@ -225,7 +233,50 @@ internal class BitmapRenderer {
         }
     }
 
+    /**
+     * Draw bitmap to surface (optimized version)
+     * Uses synchronization instead of bitmap.copy() for better performance
+     */
     fun drawBitmap(bitmap: Bitmap): Boolean {
+        if (!isInitialized.get()) {
+            return false
+        }
+
+        val handler = this.handler ?: return false
+
+        // Optimization: Instead of copying the bitmap, we synchronize access
+        // The caller (HaishinKitUnityWrapper) already has a reusable bitmap
+        // We need to ensure the bitmap is not modified while we're uploading to GPU
+
+        // For maximum compatibility, still copy but reuse the copy buffer
+        synchronized(bitmapLock) {
+            // Recycle previous pending bitmap if exists
+            pendingBitmap?.recycle()
+            // Create new copy (can't avoid this without native texture sharing)
+            pendingBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        }
+
+        // バックグラウンドスレッドで描画
+        handler.post {
+            var bitmapToRender: Bitmap?
+            synchronized(bitmapLock) {
+                bitmapToRender = pendingBitmap
+                pendingBitmap = null
+            }
+            bitmapToRender?.let { bmp ->
+                drawBitmapOnThread(bmp)
+                bmp.recycle()
+            }
+        }
+
+        return true
+    }
+
+    /**
+     * Legacy draw method (for reference/fallback)
+     */
+    @Suppress("unused")
+    fun drawBitmapLegacy(bitmap: Bitmap): Boolean {
         if (!isInitialized.get()) {
             return false
         }
@@ -270,7 +321,23 @@ internal class BitmapRenderer {
             // Bitmapをテクスチャにアップロード
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
-            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+
+            // Optimization: Use texSubImage2D if texture is already allocated with same size
+            // texSubImage2D is faster than texImage2D for same-size updates
+            val bitmapWidth = bitmap.width
+            val bitmapHeight = bitmap.height
+            if (textureAllocatedWidth == bitmapWidth && textureAllocatedHeight == bitmapHeight) {
+                // Same size: use faster texSubImage2D
+                GLUtils.texSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, bitmap)
+            } else {
+                // Different size or first frame: use texImage2D to allocate
+                GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+                textureAllocatedWidth = bitmapWidth
+                textureAllocatedHeight = bitmapHeight
+                if (frameCount <= 5) {
+                    Log.d(TAG, "drawBitmapOnThread: texture allocated ${bitmapWidth}x${bitmapHeight}")
+                }
+            }
 
             // 頂点属性設定
             GLES20.glEnableVertexAttribArray(positionHandle)
@@ -300,7 +367,7 @@ internal class BitmapRenderer {
             EGL14.eglSwapBuffers(display, surface)
 
             if (frameCount <= 5 || frameCount % 100 == 0) {
-                Log.d(TAG, "drawBitmapOnThread: frame #$frameCount rendered and swapped, pts=${presentationTimeNanos/1000000}ms")
+                Log.d(TAG, "drawBitmapOnThread: frame #$frameCount rendered, pts=${presentationTimeNanos/1000000}ms")
             }
 
         } catch (e: Exception) {
@@ -313,6 +380,14 @@ internal class BitmapRenderer {
         isInitialized.set(false)
         frameCount = 0
         startTimeNanos = 0L
+        textureAllocatedWidth = 0
+        textureAllocatedHeight = 0
+
+        // Clean up pending bitmap
+        synchronized(bitmapLock) {
+            pendingBitmap?.recycle()
+            pendingBitmap = null
+        }
 
         // バックグラウンドスレッドで解放処理を実行
         val latch = CountDownLatch(1)

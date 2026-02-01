@@ -54,10 +54,33 @@ class AudioCodec : Codec() {
             buffer.channelCount = value
         }
     var bitRate = DEFAULT_BIT_RATE
+        set(value) {
+            // Validate bitrate range for AAC (8kbps - 320kbps per channel)
+            val minBitrate = 8000 * channelCount
+            val maxBitrate = 320000 * channelCount
+            field = value.coerceIn(minBitrate, maxBitrate)
+            if (field != value) {
+                Log.w(TAG, "Bitrate clamped: $value -> $field (valid range: $minBitrate-$maxBitrate)")
+            }
+        }
     var aacProfile = DEFAULT_AAC_PROFILE
     override var inputMimeType = MediaFormat.MIMETYPE_AUDIO_RAW
     override var outputMimeType = MediaFormat.MIMETYPE_AUDIO_AAC
     private var buffer = AudioCodecBuffer()
+
+    /**
+     * Enable debug logging for audio buffer diagnostics
+     */
+    var debugLogging: Boolean
+        get() = buffer.debugLogging
+        set(value) {
+            buffer.debugLogging = value
+        }
+
+    /**
+     * Get buffer statistics for diagnostics
+     */
+    internal fun getBufferStatistics(): AudioCodecBuffer.Statistics = buffer.getStatistics()
 
     // Pending input buffer indices waiting for data
     private val pendingBufferIndices = java.util.concurrent.ConcurrentLinkedQueue<Int>()
@@ -163,8 +186,13 @@ class AudioCodec : Codec() {
         }
 
     override fun dispose() {
+        // Log final statistics
+        val stats = buffer.getStatistics()
+        Log.d(TAG, "AudioCodec dispose: $stats")
+
         pendingBufferIndices.clear()
         buffer.clear()
+        inputBufferCount = 0
         super.dispose()
     }
 

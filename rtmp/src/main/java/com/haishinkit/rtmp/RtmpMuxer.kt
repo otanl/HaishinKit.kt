@@ -233,6 +233,7 @@ internal class RtmpMuxer(
 
             MediaFormat.MIMETYPE_VIDEO_AVC -> {
                 if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                    Log.d(TAG, ">>> onSampleOutput: AVC CODEC_CONFIG, size=${info.size}")
                     return true
                 }
                 frameTracker?.track(FrameTracker.TYPE_VIDEO, SystemClock.uptimeMillis())
@@ -242,6 +243,10 @@ internal class RtmpMuxer(
                 val timestamp = (info.presentationTimeUs - videoTimestamp).toInt()
                 val keyframe = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
                 val video = stream.messageFactory.createRtmpVideoMessage()
+                val frameNum = stream.frameCount.get() + 1
+                if (frameNum <= 5 || frameNum % 100 == 0) {
+                    Log.d(TAG, ">>> onSampleOutput: AVC frame #$frameNum, size=${info.size}, keyframe=$keyframe, timestamp=${timestamp/1000}ms")
+                }
                 stream.doOutput(
                     RtmpChunk.ONE,
                     video.apply {
@@ -258,6 +263,9 @@ internal class RtmpMuxer(
                 )
                 stream.frameCount.incrementAndGet()
                 videoTimestamp += video.timestamp * 1000
+                if (frameNum <= 5 || frameNum % 100 == 0) {
+                    Log.d(TAG, ">>> onSampleOutput: AVC frame #$frameNum sent to RTMP")
+                }
                 return true
             }
 
@@ -313,6 +321,7 @@ internal class RtmpMuxer(
 
             MediaFormat.MIMETYPE_AUDIO_AAC -> {
                 if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                    Log.d(TAG, ">>> onSampleOutput: AAC CODEC_CONFIG, size=${info.size}")
                     return true
                 }
                 frameTracker?.track(FrameTracker.TYPE_AUDIO, SystemClock.uptimeMillis())
@@ -321,6 +330,10 @@ internal class RtmpMuxer(
                 }
                 val timestamp = (info.presentationTimeUs - audioTimestamp).toInt()
                 val audio = stream.messageFactory.createRtmpAudioMessage()
+                val audioFrameNum = stream.audioFrameCount.incrementAndGet()
+                if (audioFrameNum <= 5 || audioFrameNum % 100 == 0) {
+                    Log.d(TAG, ">>> onSampleOutput: AAC frame #$audioFrameNum, size=${info.size}, timestamp=${timestamp/1000}ms")
+                }
                 stream.doOutput(
                     RtmpChunk.ONE,
                     audio.apply {
@@ -333,6 +346,9 @@ internal class RtmpMuxer(
                     },
                 )
                 audioTimestamp += audio.timestamp * 1000
+                if (audioFrameNum <= 5 || audioFrameNum % 100 == 0) {
+                    Log.d(TAG, ">>> onSampleOutput: AAC frame #$audioFrameNum sent to RTMP")
+                }
                 return true
             }
         }

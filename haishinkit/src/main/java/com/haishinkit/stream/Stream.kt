@@ -65,6 +65,12 @@ abstract class Stream(
             return field
         }
 
+    /**
+     * When true, video input is provided externally via videoCodec.inputSurface
+     * and the internal Screen/PixelTransform pipeline is bypassed.
+     */
+    var useExternalVideoInput: Boolean = false
+
     override val screen: Screen = Screen.create(context)
         get() {
             if (dataSource != null) {
@@ -79,7 +85,11 @@ abstract class Stream(
 
     protected val audioCodec by lazy { AudioCodec() }
 
-    protected val videoCodec by lazy { VideoCodec(context) }
+    /**
+     * The video codec instance.
+     * Exposed for direct access to inputSurface in Unity integration.
+     */
+    val videoCodec by lazy { VideoCodec(context) }
 
     protected var mode = Codec.MODE_ENCODE
         set(value) {
@@ -131,14 +141,25 @@ abstract class Stream(
         videoCodec.dispose()
     }
 
+    private var appendCallCount = 0
+
     override fun append(buffer: MediaBuffer) {
+        appendCallCount++
         outputs.forEach {
             it.append(buffer)
         }
-        if (!isRunning.get()) return
+        if (!isRunning.get()) {
+            if (appendCallCount <= 10 || appendCallCount % 500 == 0) {
+                Log.d(TAG, "append #$appendCallCount: SKIPPED because isRunning=false, type=${buffer.type}")
+            }
+            return
+        }
         when (buffer.type) {
             MediaType.AUDIO -> {
                 buffer.payload?.let {
+                    if (appendCallCount <= 10 || appendCallCount % 200 == 0) {
+                        Log.d(TAG, "append #$appendCallCount: audioCodec.append() called, payload.remaining=${it.remaining()}")
+                    }
                     audioCodec.append(it)
                 }
             }
@@ -209,16 +230,26 @@ abstract class Stream(
     @Synchronized
     protected open fun startRunning() {
         if (isRunning.get()) return
-        if (BuildConfig.DEBUG) {
-            Log.d(TAG, "startRunning()")
-        }
+        Log.d(TAG, "startRunning() mode=$mode, hasVideo=$hasVideo, hasAudio=$hasAudio, dataSource=$dataSource, useExternalVideoInput=$useExternalVideoInput")
         when (mode) {
             Codec.MODE_ENCODE -> {
+                // useExternalVideoInputがtrueの場合はpixelTransform.screenを設定しない
+                // 外部からvideoCodec.inputSurfaceに直接描画される
+                if (!useExternalVideoInput && dataSource == null) {
+                    Log.d(TAG, "startRunning() setting pixelTransform.screen, screen.frame=${screen.frame}")
+                    videoCodec.pixelTransform.screen = screen
+                } else if (useExternalVideoInput) {
+                    Log.d(TAG, "startRunning() using external video input (bypassing PixelTransform)")
+                }
                 if (hasAudio) {
+                    Log.d(TAG, "startRunning() starting audioCodec")
                     audioCodec.startRunning()
                 }
                 if (hasVideo) {
+                    Log.d(TAG, "startRunning() starting videoCodec")
                     videoCodec.startRunning()
+                } else {
+                    Log.d(TAG, "startRunning() skipping videoCodec because hasVideo=false")
                 }
             }
 

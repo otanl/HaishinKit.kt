@@ -97,6 +97,15 @@ internal class GraphicsContext {
         )
     }
 
+    fun createPbufferSurface(width: Int, height: Int): EGLSurface? {
+        val attributes = intArrayOf(
+            EGL14.EGL_WIDTH, width,
+            EGL14.EGL_HEIGHT, height,
+            EGL14.EGL_NONE
+        )
+        return EGL14.eglCreatePbufferSurface(display, config, attributes, 0)
+    }
+
     fun readPixels(
         width: Int,
         height: Int,

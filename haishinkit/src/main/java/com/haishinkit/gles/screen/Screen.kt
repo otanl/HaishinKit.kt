@@ -132,10 +132,16 @@ internal class Screen(
 
     override fun startRunning() {
         if (isRunning.get()) return
+        android.util.Log.d(TAG, "startRunning() called")
         isRunning.set(true)
         graphicsContext.open(null)
-        graphicsContext.makeCurrent(null)
+        // PbufferSurfaceを作成してオフスクリーンレンダリングを可能にする
+        val pbufferSurface = graphicsContext.createPbufferSurface(1, 1)
+        android.util.Log.d(TAG, "startRunning() pbufferSurface created: $pbufferSurface")
+        graphicsContext.makeCurrent(pbufferSurface)
+        android.util.Log.d(TAG, "startRunning() graphicsContext initialized")
         choreographer = Choreographer.getInstance()
+        android.util.Log.d(TAG, "startRunning() choreographer started")
     }
 
     override fun stopRunning() {

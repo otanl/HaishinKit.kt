@@ -124,6 +124,7 @@ class RtmpStream(
                 }
 
                 Code.PUBLISH_START.rawValue -> {
+                    Log.d(TAG, ">>> PUBLISH_START received, setting readyState to PUBLISHING")
                     stream.readyState = ReadyState.PUBLISHING
                 }
 
@@ -212,6 +213,7 @@ class RtmpStream(
                 ReadyState.OPEN -> {
                     currentFPS = 0
                     frameCount.set(0)
+                    audioFrameCount.set(0)
                     for (message in messages) {
                         message.streamID = id
                         if (message is RtmpCommandMessage) {
@@ -232,8 +234,11 @@ class RtmpStream(
                 }
 
                 ReadyState.PUBLISHING -> {
+                    Log.d(TAG, ">>> ReadyState changed to PUBLISHING, hasVideo=$hasVideo, hasAudio=$hasAudio")
                     mode = Codec.MODE_ENCODE
+                    Log.d(TAG, ">>> Calling startRunning()")
                     startRunning()
+                    Log.d(TAG, ">>> startRunning() completed")
                     send("@setDataFrame", "onMetaData", toMetaData())
                 }
 
@@ -248,6 +253,7 @@ class RtmpStream(
     internal var muxer = RtmpMuxer(this)
     internal val messages = ArrayList<RtmpMessage>()
     internal var frameCount = AtomicInteger(0)
+    internal var audioFrameCount = AtomicInteger(0)
     internal var messageFactory = RtmpMessageFactory(4)
     internal var videoTimestamp = DEFAULT_TIMESTAMP
     internal var audioTimestamp = DEFAULT_TIMESTAMP

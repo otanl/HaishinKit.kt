@@ -145,6 +145,14 @@ class VideoCodec(
         }
     }
 
+    /**
+     * The input surface for direct bitmap rendering.
+     * This surface can be used to bypass the PixelTransform pipeline
+     * and draw directly to the MediaCodec input.
+     */
+    var inputSurface: android.view.Surface? = null
+        private set
+
     override var inputMimeType = MediaFormat.MIMETYPE_VIDEO_RAW
     override var outputMimeType = DEFAULT_PROFILE_LEVEL.mime
 
@@ -153,6 +161,7 @@ class VideoCodec(
         set(value) {
             if (value == null) {
                 pixelTransform.surface = null
+                inputSurface = null
             }
             super.codec = value
         }
@@ -186,10 +195,18 @@ class VideoCodec(
         }
 
     override fun configure(codec: MediaCodec) {
+        android.util.Log.d(TAG, ">>> configure() mode=$mode, width=$width, height=$height")
         super.configure(codec)
         if (mode == MODE_ENCODE) {
+            android.util.Log.d(TAG, ">>> configure() setting imageExtent and surface")
             pixelTransform.imageExtent = Size(width, height)
-            pixelTransform.surface = codec.createInputSurface()
+            val surface = codec.createInputSurface()
+            android.util.Log.d(TAG, ">>> configure() inputSurface created: $surface, isValid=${surface.isValid}")
+            inputSurface = surface
+            android.util.Log.d(TAG, ">>> configure() inputSurface stored: $inputSurface")
+            // PixelTransformにsurfaceを設定（screenが設定されている場合のみ動作）
+            pixelTransform.surface = surface
+            android.util.Log.d(TAG, ">>> configure() pixelTransform.surface set, pixelTransform.screen=${pixelTransform.screen}")
         }
     }
 

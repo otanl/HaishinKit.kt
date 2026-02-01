@@ -14,11 +14,14 @@ internal class Framebuffer {
 
     var bounds = Rect()
         set(value) {
+            Log.d(TAG, "bounds setter: value=$value, current=$field")
             if (field == value) return
             field = value
             try {
+                Log.d(TAG, "bounds setter: generating framebuffer and texture")
                 // framebuffers.
                 GLES20.glGenFramebuffers(1, framebufferIds, 0)
+                Log.d(TAG, "bounds setter: framebufferId=${framebufferIds[0]}")
                 GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, framebufferIds[0])
                 Utils.checkGlError("glBindFramebuffer")
 
@@ -40,6 +43,7 @@ internal class Framebuffer {
 
                 // textures.
                 GLES20.glGenTextures(1, textureIds, 0)
+                Log.d(TAG, "bounds setter: textureId=${textureIds[0]}")
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureIds[0])
                 GLES20.glTexImage2D(
                     GLES20.GL_TEXTURE_2D,
@@ -72,11 +76,13 @@ internal class Framebuffer {
                 )
 
                 val status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER)
+                Log.d(TAG, "bounds setter: framebuffer status=$status (complete=${GLES20.GL_FRAMEBUFFER_COMPLETE})")
                 if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
-                    throw RuntimeException("" + status)
+                    throw RuntimeException("Framebuffer incomplete: $status")
                 }
+                Log.d(TAG, "bounds setter: completed, textureId=${textureIds[0]}")
             } catch (e: RuntimeException) {
-                Log.w(TAG, "", e)
+                Log.e(TAG, "bounds setter: FAILED", e)
                 release()
             }
         }

@@ -244,6 +244,8 @@ abstract class Codec :
         }
     }
 
+    private var outputFrameCount = 0
+
     override fun onOutputBufferAvailable(
         codec: MediaCodec,
         index: Int,
@@ -251,6 +253,10 @@ abstract class Codec :
     ) {
         if (!isRunning.get()) return
         try {
+            outputFrameCount++
+            if (outputFrameCount <= 5 || outputFrameCount % 100 == 0) {
+                Log.d(TAG, ">>> onOutputBufferAvailable: frame #$outputFrameCount, size=${info.size}, flags=${info.flags}, mime=$outputMimeType")
+            }
             val buffer = codec.getOutputBuffer(index) ?: return
             if (listener?.onSampleOutput(outputMimeType, index, info, buffer) == true) {
                 codec.releaseOutputBuffer(index, false)

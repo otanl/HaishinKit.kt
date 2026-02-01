@@ -27,12 +27,19 @@ object UnityBridge {
      */
     @JvmStatic
     fun initialize(activity: Activity) {
-        Log.d(TAG, "initialize")
-        activityRef = WeakReference(activity)
-        wrapper = HaishinKitUnityWrapper(activity).apply {
-            setStatusCallback { status ->
-                sendMessageToUnity(status)
+        Log.d(TAG, ">>> initialize called with activity: $activity")
+        try {
+            activityRef = WeakReference(activity)
+            Log.d(TAG, ">>> Creating HaishinKitUnityWrapper...")
+            wrapper = HaishinKitUnityWrapper(activity).apply {
+                setStatusCallback { status ->
+                    Log.d(TAG, ">>> Status callback: $status")
+                    sendMessageToUnity(status)
+                }
             }
+            Log.d(TAG, ">>> initialize completed successfully, wrapper=$wrapper")
+        } catch (e: Exception) {
+            Log.e(TAG, ">>> initialize FAILED: ${e.message}", e)
         }
     }
 
@@ -68,14 +75,28 @@ object UnityBridge {
      * バージョンを取得
      */
     @JvmStatic
-    fun getVersion(): String = wrapper?.getVersion() ?: "not initialized"
+    fun getVersion(): String {
+        val version = wrapper?.getVersion() ?: "not initialized"
+        Log.d(TAG, ">>> getVersion: $version, wrapper=$wrapper")
+        return version
+    }
 
     /**
      * 接続
      */
     @JvmStatic
     fun connect(url: String, streamName: String) {
-        wrapper?.connect(url, streamName)
+        Log.d(TAG, ">>> connect called: url=$url, streamName=$streamName, wrapper=$wrapper")
+        if (wrapper == null) {
+            Log.e(TAG, ">>> connect FAILED: wrapper is null!")
+            return
+        }
+        try {
+            wrapper?.connect(url, streamName)
+            Log.d(TAG, ">>> connect call completed")
+        } catch (e: Exception) {
+            Log.e(TAG, ">>> connect FAILED: ${e.message}", e)
+        }
     }
 
     /**
@@ -107,6 +128,7 @@ object UnityBridge {
      */
     @JvmStatic
     fun sendVideoFrame(pixels: ByteArray, width: Int, height: Int) {
+        Log.d(TAG, ">>> sendVideoFrame: ${pixels.size} bytes, ${width}x${height}")
         wrapper?.sendVideoFrame(pixels, width, height)
     }
 
@@ -148,6 +170,14 @@ object UnityBridge {
     @JvmStatic
     fun setAudioBitrate(kbps: Int) {
         wrapper?.setAudioBitrate(kbps)
+    }
+
+    /**
+     * オーディオサンプルレート設定
+     */
+    @JvmStatic
+    fun setAudioSampleRate(sampleRate: Int) {
+        wrapper?.setAudioSampleRate(sampleRate)
     }
 
     /**

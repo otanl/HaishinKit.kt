@@ -29,6 +29,7 @@ internal class PixelTransform(
     override val isRunning: AtomicBoolean = AtomicBoolean(false)
     override var screen: Screen? = null
         set(value) {
+            Log.d(TAG, "screen setter: value=$value, current=$field, surface=$surface")
             if (value == field) return
             if (field != null) {
                 stopRunning()
@@ -37,16 +38,19 @@ internal class PixelTransform(
             if (value == null) {
                 stopRunning()
             } else {
+                Log.d(TAG, "screen setter: calling startRunning(), surface=$surface")
                 startRunning()
             }
         }
     override var surface: Surface? = null
         set(value) {
+            Log.d(TAG, "surface setter: value=$value, current=$field, screen=$screen")
             if (value == field) return
             field = value
             if (value == null) {
                 stopRunning()
             } else {
+                Log.d(TAG, "surface setter: calling startRunning(), screen=$screen")
                 startRunning()
             }
         }
@@ -106,13 +110,19 @@ internal class PixelTransform(
     private val video: VideoScreenObject by lazy { VideoScreenObject(target = GLES20.GL_TEXTURE_2D) }
     private val renderer: Renderer by lazy { NullRenderer.SHARED }
     private val fpsController: FpsController by lazy { ScheduledFpsController() }
+    private var frameLogCount = 0
 
     override fun startRunning() {
-        if (isRunning.get()) return
-        if (screen == null || surface == null) return
-        if (BuildConfig.DEBUG) {
-            Log.d(TAG, "startRunning()")
+        Log.d(TAG, "startRunning() isRunning=${isRunning.get()}, screen=$screen, surface=$surface")
+        if (isRunning.get()) {
+            Log.d(TAG, "startRunning() already running, returning")
+            return
         }
+        if (screen == null || surface == null) {
+            Log.d(TAG, "startRunning() screen or surface is null, returning (screen=$screen, surface=$surface)")
+            return
+        }
+        Log.d(TAG, "startRunning() proceeding with initialization")
         isRunning.set(true)
         video.videoGravity = videoGravity
         graphicsContext.apply {
@@ -147,11 +157,33 @@ internal class PixelTransform(
             choreographer?.postFrameCallback(this)
         }
         if (frameTimeNanos <= 0L || surface == null) {
+            if (frameLogCount < 5) {
+                Log.d(TAG, "doFrame() early return: frameTimeNanos=$frameTimeNanos, surface=$surface")
+                frameLogCount++
+            }
             return
         }
-        val screen = screen ?: return
+        val screen = screen ?: run {
+            if (frameLogCount < 5) {
+                Log.d(TAG, "doFrame() screen is null")
+                frameLogCount++
+            }
+            return
+        }
         var timestamp = frameTimeNanos
         if (fpsController.advanced(timestamp)) {
+            // screen.id=0はテクスチャが未生成なのでスキップ
+            if (screen.id == 0) {
+                if (frameLogCount < 10) {
+                    Log.d(TAG, "doFrame() skipping: screen.id=0 (texture not ready)")
+                    frameLogCount++
+                }
+                return
+            }
+            if (frameLogCount < 5) {
+                Log.d(TAG, "doFrame() processing frame, screen.id=${screen.id}, screen.frame=${screen.frame}")
+                frameLogCount++
+            }
             timestamp = fpsController.timestamp(timestamp)
             try {
                 clearColor(backgroundColor)

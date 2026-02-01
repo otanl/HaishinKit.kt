@@ -133,6 +133,49 @@ object UnityBridge {
     }
 
     /**
+     * ビデオフレーム送信（Native OpenGL Texture - Zero Copy）
+     */
+    @JvmStatic
+    fun sendVideoFrameNativeTexture(textureId: Int, width: Int, height: Int) {
+        wrapper?.sendVideoFrameNativeTexture(textureId, width, height)
+    }
+
+    /**
+     * Native Texture Mode設定（Zero Copy）
+     */
+    @JvmStatic
+    fun setUseNativeTexture(enabled: Boolean) {
+        wrapper?.setUseNativeTexture(enabled)
+    }
+
+    /**
+     * C++ Native Plugin Mode設定（Zero Copy via GL.IssuePluginEvent）
+     * This is the recommended approach for zero-copy texture sharing.
+     */
+    @JvmStatic
+    fun setUseNativePlugin(enabled: Boolean) {
+        wrapper?.setUseNativePlugin(enabled)
+    }
+
+    /**
+     * Initialize the C++ Native Plugin with MediaCodec's input surface
+     * Must be called after videoCodec is initialized.
+     * @return true if initialization succeeded
+     */
+    @JvmStatic
+    fun initializeNativePlugin(): Boolean {
+        return wrapper?.initializeNativePlugin() ?: false
+    }
+
+    /**
+     * Check if the C++ Native Plugin is ready to render
+     */
+    @JvmStatic
+    fun isNativePluginReady(): Boolean {
+        return wrapper?.isNativePluginReady() ?: false
+    }
+
+    /**
      * オーディオフレーム送信
      */
     @JvmStatic

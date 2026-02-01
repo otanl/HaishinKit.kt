@@ -1,14 +1,13 @@
 package com.haishinkit.unity
 
-import android.graphics.Bitmap
 import android.opengl.EGL14
 import android.opengl.EGLConfig
 import android.opengl.EGLContext
 import android.opengl.EGLDisplay
 import android.opengl.EGLExt
 import android.opengl.EGLSurface
+import android.opengl.GLES11Ext
 import android.opengl.GLES20
-import android.opengl.GLUtils
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
@@ -20,15 +19,23 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * OpenGL ESを使用してBitmapをSurfaceに描画するレンダラー
- * MediaCodecのInputSurfaceへの直接描画に使用
- * 専用のバックグラウンドスレッドで動作してUnityのOpenGLコンテキストとの競合を防ぐ
+ * OpenGL ES Native Texture Renderer
+ *
+ * Renders Unity's native OpenGL texture directly to MediaCodec's InputSurface
+ * without CPU memory copies (zero-copy approach).
+ *
+ * Technical approach:
+ * 1. Receive Unity's OpenGL texture ID (from GetNativeTexturePtr())
+ * 2. Use the texture directly in our EGL context (requires shared context or EGLImage)
+ * 3. Render to MediaCodec's InputSurface
+ *
+ * Note: This requires Unity to use OpenGL ES backend (not Vulkan)
  */
-internal class BitmapRenderer : BitmapVideoRenderer {
+internal class NativeTextureRenderer : TextureVideoRenderer {
     companion object {
-        private const val TAG = "BitmapRenderer"
+        private const val TAG = "NativeTextureRenderer"
 
-        // 頂点シェーダー
+        // Vertex shader - simple passthrough
         private const val VERTEX_SHADER = """
             attribute vec4 aPosition;
             attribute vec2 aTexCoord;
@@ -39,40 +46,46 @@ internal class BitmapRenderer : BitmapVideoRenderer {
             }
         """
 
-        // フラグメントシェーダー
+        // Fragment shader for regular GL_TEXTURE_2D with gamma correction
         private const val FRAGMENT_SHADER = """
             precision mediump float;
             varying vec2 vTexCoord;
             uniform sampler2D uTexture;
             void main() {
-                gl_FragColor = texture2D(uTexture, vTexCoord);
+                vec4 color = texture2D(uTexture, vTexCoord);
+                // Linear to sRGB gamma correction (gamma 2.2 approximation)
+                // Using max() to ensure non-negative values for pow()
+                vec3 clamped = max(color.rgb, vec3(0.0));
+                vec3 srgb = pow(clamped, vec3(0.4545));
+                gl_FragColor = vec4(srgb, color.a);
             }
         """
 
-        // 頂点座標（フルスクリーン四角形）
+        // Vertex coordinates (fullscreen quad)
         private val VERTEX_DATA = floatArrayOf(
-            -1f, -1f,  // 左下
-             1f, -1f,  // 右下
-            -1f,  1f,  // 左上
-             1f,  1f   // 右上
+            -1f, -1f,  // bottom-left
+             1f, -1f,  // bottom-right
+            -1f,  1f,  // top-left
+             1f,  1f   // top-right
         )
 
-        // テクスチャ座標
+        // Texture coordinates (flip Y for Unity)
         private val TEXTURE_DATA = floatArrayOf(
-            0f, 0f,  // 左下
-            1f, 0f,  // 右下
-            0f, 1f,  // 左上
-            1f, 1f   // 右上
+            0f, 1f,  // bottom-left (flipped)
+            1f, 1f,  // bottom-right (flipped)
+            0f, 0f,  // top-left (flipped)
+            1f, 0f   // top-right (flipped)
         )
     }
 
+    // EGL resources
     private var display: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var context: EGLContext = EGL14.EGL_NO_CONTEXT
     private var surface: EGLSurface = EGL14.EGL_NO_SURFACE
     private var config: EGLConfig? = null
 
+    // OpenGL resources
     private var program = 0
-    private var textureId = 0
     private var positionHandle = 0
     private var texCoordHandle = 0
     private var textureHandle = 0
@@ -80,6 +93,7 @@ internal class BitmapRenderer : BitmapVideoRenderer {
     private var vertexBuffer: FloatBuffer? = null
     private var textureBuffer: FloatBuffer? = null
 
+    // State
     private var width = 0
     private var height = 0
     private var _isInitialized = AtomicBoolean(false)
@@ -87,28 +101,26 @@ internal class BitmapRenderer : BitmapVideoRenderer {
     private var frameCount = 0
     private var startTimeNanos = 0L
 
-    // バックグラウンドスレッド
+    // Background thread
     private var handlerThread: HandlerThread? = null
     private var handler: Handler? = null
 
-    // Optimization: track if texture is already allocated with correct size
-    private var textureAllocatedWidth = 0
-    private var textureAllocatedHeight = 0
+    // Last texture ID for validation
+    private var lastTextureId = 0
 
-    // Optimization: use double buffering to avoid bitmap.copy()
-    private var pendingBitmap: Bitmap? = null
-    private val bitmapLock = Object()
-
+    /**
+     * Initialize the renderer with MediaCodec's input surface
+     */
     override fun initialize(inputSurface: Surface, width: Int, height: Int): Boolean {
         Log.d(TAG, "initialize: ${width}x${height}")
         this.width = width
         this.height = height
 
-        // 専用のレンダリングスレッドを作成
-        handlerThread = HandlerThread("BitmapRenderer").apply { start() }
+        // Create dedicated rendering thread
+        handlerThread = HandlerThread("NativeTextureRenderer").apply { start() }
         handler = Handler(handlerThread!!.looper)
 
-        // スレッド上で初期化を実行
+        // Initialize on thread
         val latch = CountDownLatch(1)
         var success = false
 
@@ -131,7 +143,7 @@ internal class BitmapRenderer : BitmapVideoRenderer {
         Log.d(TAG, "initializeOnThread")
 
         try {
-            // EGL初期化
+            // EGL initialization
             display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
             if (display == EGL14.EGL_NO_DISPLAY) {
                 Log.e(TAG, "eglGetDisplay failed")
@@ -144,7 +156,7 @@ internal class BitmapRenderer : BitmapVideoRenderer {
                 return false
             }
 
-            // EGLConfig選択
+            // EGLConfig selection
             val configAttribs = intArrayOf(
                 EGL14.EGL_RED_SIZE, 8,
                 EGL14.EGL_GREEN_SIZE, 8,
@@ -162,7 +174,7 @@ internal class BitmapRenderer : BitmapVideoRenderer {
             }
             config = configs[0]
 
-            // EGLContext作成
+            // EGLContext creation
             val contextAttribs = intArrayOf(
                 EGL14.EGL_CONTEXT_CLIENT_VERSION, 2,
                 EGL14.EGL_NONE
@@ -173,7 +185,7 @@ internal class BitmapRenderer : BitmapVideoRenderer {
                 return false
             }
 
-            // EGLSurface作成（MediaCodecのInputSurfaceをラップ）
+            // EGLSurface creation (wrapping MediaCodec's InputSurface)
             val surfaceAttribs = intArrayOf(EGL14.EGL_NONE)
             surface = EGL14.eglCreateWindowSurface(display, config, inputSurface, surfaceAttribs, 0)
             if (surface == EGL14.EGL_NO_SURFACE) {
@@ -181,35 +193,25 @@ internal class BitmapRenderer : BitmapVideoRenderer {
                 return false
             }
 
-            // コンテキストをカレントに設定
+            // Make context current
             if (!EGL14.eglMakeCurrent(display, surface, surface, context)) {
                 Log.e(TAG, "eglMakeCurrent failed")
                 return false
             }
 
-            // シェーダープログラム作成
+            // Create shader program
             program = createProgram()
             if (program == 0) {
                 Log.e(TAG, "createProgram failed")
                 return false
             }
 
-            // シェーダー属性取得
+            // Get shader attribute locations
             positionHandle = GLES20.glGetAttribLocation(program, "aPosition")
             texCoordHandle = GLES20.glGetAttribLocation(program, "aTexCoord")
             textureHandle = GLES20.glGetUniformLocation(program, "uTexture")
 
-            // テクスチャ作成
-            val textures = IntArray(1)
-            GLES20.glGenTextures(1, textures, 0)
-            textureId = textures[0]
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
-
-            // 頂点バッファ作成
+            // Create vertex buffers
             vertexBuffer = ByteBuffer.allocateDirect(VERTEX_DATA.size * 4)
                 .order(ByteOrder.nativeOrder())
                 .asFloatBuffer()
@@ -225,7 +227,7 @@ internal class BitmapRenderer : BitmapVideoRenderer {
             GLES20.glViewport(0, 0, width, height)
 
             _isInitialized.set(true)
-            Log.d(TAG, "initializeOnThread: success, textureId=$textureId")
+            Log.d(TAG, "initializeOnThread: success")
             return true
 
         } catch (e: Exception) {
@@ -235,68 +237,38 @@ internal class BitmapRenderer : BitmapVideoRenderer {
     }
 
     /**
-     * Draw bitmap to surface (optimized version)
-     * Uses synchronization instead of bitmap.copy() for better performance
+     * Render Unity's native texture to the output surface.
+     *
+     * @param textureId Unity's OpenGL texture ID (from GetNativeTexturePtr())
+     * @return true if rendering succeeded
+     *
+     * IMPORTANT: This approach has limitations:
+     * - The texture ID is from Unity's EGL context, not ours
+     * - Direct usage may not work across different EGL contexts
+     * - If this fails, we need to use EGLImage or a native plugin approach
      */
-    override fun drawBitmap(bitmap: Bitmap): Boolean {
+    override fun renderTexture(textureId: Int): Boolean {
         if (!_isInitialized.get()) {
+            Log.w(TAG, "renderTexture: not initialized")
+            return false
+        }
+
+        if (textureId <= 0) {
+            Log.w(TAG, "renderTexture: invalid textureId=$textureId")
             return false
         }
 
         val handler = this.handler ?: return false
 
-        // Optimization: Instead of copying the bitmap, we synchronize access
-        // The caller (HaishinKitUnityWrapper) already has a reusable bitmap
-        // We need to ensure the bitmap is not modified while we're uploading to GPU
-
-        // For maximum compatibility, still copy but reuse the copy buffer
-        synchronized(bitmapLock) {
-            // Recycle previous pending bitmap if exists
-            pendingBitmap?.recycle()
-            // Create new copy (can't avoid this without native texture sharing)
-            pendingBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, false)
-        }
-
-        // バックグラウンドスレッドで描画
+        // Post to rendering thread
         handler.post {
-            var bitmapToRender: Bitmap?
-            synchronized(bitmapLock) {
-                bitmapToRender = pendingBitmap
-                pendingBitmap = null
-            }
-            bitmapToRender?.let { bmp ->
-                drawBitmapOnThread(bmp)
-                bmp.recycle()
-            }
+            renderTextureOnThread(textureId)
         }
 
         return true
     }
 
-    /**
-     * Legacy draw method (for reference/fallback)
-     */
-    @Suppress("unused")
-    fun drawBitmapLegacy(bitmap: Bitmap): Boolean {
-        if (!_isInitialized.get()) {
-            return false
-        }
-
-        val handler = this.handler ?: return false
-
-        // Bitmapをコピー（元のBitmapが再利用される可能性があるため）
-        val bitmapCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
-
-        // バックグラウンドスレッドで描画
-        handler.post {
-            drawBitmapOnThread(bitmapCopy)
-            bitmapCopy.recycle()
-        }
-
-        return true
-    }
-
-    private fun drawBitmapOnThread(bitmap: Bitmap) {
+    private fun renderTextureOnThread(textureId: Int) {
         if (!_isInitialized.get()) {
             return
         }
@@ -304,93 +276,90 @@ internal class BitmapRenderer : BitmapVideoRenderer {
         frameCount++
 
         try {
-            // コンテキストをカレントに設定
+            // Make our context current
             if (!EGL14.eglMakeCurrent(display, surface, surface, context)) {
                 if (frameCount <= 5) {
-                    Log.e(TAG, "drawBitmapOnThread: eglMakeCurrent failed")
+                    Log.e(TAG, "renderTextureOnThread: eglMakeCurrent failed")
                 }
                 return
             }
 
-            // クリア
+            // Clear
             GLES20.glClearColor(0f, 0f, 0f, 1f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-            // シェーダープログラム使用
+            // Use shader program
             GLES20.glUseProgram(program)
 
-            // Bitmapをテクスチャにアップロード
+            // Bind Unity's texture
+            // NOTE: This may fail if the texture is from a different EGL context
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
 
-            // Optimization: Use texSubImage2D if texture is already allocated with same size
-            // texSubImage2D is faster than texImage2D for same-size updates
-            val bitmapWidth = bitmap.width
-            val bitmapHeight = bitmap.height
-            if (textureAllocatedWidth == bitmapWidth && textureAllocatedHeight == bitmapHeight) {
-                // Same size: use faster texSubImage2D
-                GLUtils.texSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0, bitmap)
-            } else {
-                // Different size or first frame: use texImage2D to allocate
-                GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
-                textureAllocatedWidth = bitmapWidth
-                textureAllocatedHeight = bitmapHeight
-                if (frameCount <= 5) {
-                    Log.d(TAG, "drawBitmapOnThread: texture allocated ${bitmapWidth}x${bitmapHeight}")
+            // Check for GL errors
+            val error = GLES20.glGetError()
+            if (error != GLES20.GL_NO_ERROR) {
+                if (frameCount <= 5 || frameCount % 100 == 0) {
+                    Log.e(TAG, "renderTextureOnThread: glBindTexture error=$error for textureId=$textureId")
+                    Log.e(TAG, "This likely means the texture is from a different EGL context and cannot be shared directly.")
                 }
+                // Continue anyway to see what happens
             }
 
-            // 頂点属性設定
+            // Set texture parameters (in case they're not set)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+
+            // Setup vertex attributes
             GLES20.glEnableVertexAttribArray(positionHandle)
             GLES20.glVertexAttribPointer(positionHandle, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer)
 
             GLES20.glEnableVertexAttribArray(texCoordHandle)
             GLES20.glVertexAttribPointer(texCoordHandle, 2, GLES20.GL_FLOAT, false, 0, textureBuffer)
 
-            // テクスチャユニット設定
+            // Set texture uniform
             GLES20.glUniform1i(textureHandle, 0)
 
-            // 描画
+            // Draw
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
 
-            // 属性無効化
+            // Disable attributes
             GLES20.glDisableVertexAttribArray(positionHandle)
             GLES20.glDisableVertexAttribArray(texCoordHandle)
 
-            // タイムスタンプを設定（MediaCodecが正しいPTSを取得するために必要）
+            // Set presentation timestamp
             if (startTimeNanos == 0L) {
                 startTimeNanos = System.nanoTime()
             }
             val presentationTimeNanos = System.nanoTime() - startTimeNanos
             EGLExt.eglPresentationTimeANDROID(display, surface, presentationTimeNanos)
 
-            // スワップバッファ（MediaCodecにフレームを送信）
+            // Swap buffers (send frame to MediaCodec)
             EGL14.eglSwapBuffers(display, surface)
 
             if (frameCount <= 5 || frameCount % 100 == 0) {
-                Log.d(TAG, "drawBitmapOnThread: frame #$frameCount rendered, pts=${presentationTimeNanos/1000000}ms")
+                Log.d(TAG, "renderTextureOnThread: frame #$frameCount, textureId=$textureId, pts=${presentationTimeNanos/1000000}ms")
             }
 
+            lastTextureId = textureId
+
         } catch (e: Exception) {
-            Log.e(TAG, "drawBitmapOnThread failed", e)
+            Log.e(TAG, "renderTextureOnThread failed", e)
         }
     }
 
+    /**
+     * Release all resources
+     */
     override fun release() {
         Log.d(TAG, "release")
         _isInitialized.set(false)
         frameCount = 0
         startTimeNanos = 0L
-        textureAllocatedWidth = 0
-        textureAllocatedHeight = 0
 
-        // Clean up pending bitmap
-        synchronized(bitmapLock) {
-            pendingBitmap?.recycle()
-            pendingBitmap = null
-        }
-
-        // バックグラウンドスレッドで解放処理を実行
+        // Release on thread
         val latch = CountDownLatch(1)
         handler?.post {
             releaseOnThread()
@@ -410,11 +379,6 @@ internal class BitmapRenderer : BitmapVideoRenderer {
 
     private fun releaseOnThread() {
         Log.d(TAG, "releaseOnThread")
-
-        if (textureId != 0) {
-            GLES20.glDeleteTextures(1, intArrayOf(textureId), 0)
-            textureId = 0
-        }
 
         if (program != 0) {
             GLES20.glDeleteProgram(program)

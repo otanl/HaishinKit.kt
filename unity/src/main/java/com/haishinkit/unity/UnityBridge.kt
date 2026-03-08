@@ -12,6 +12,15 @@ import java.lang.ref.WeakReference
 object UnityBridge {
     private const val TAG = "UnityBridge"
 
+    // デバッグログ制御
+    @Volatile
+    @JvmStatic
+    var debugEnabled: Boolean = false
+        set(value) {
+            field = value
+            wrapper?.debugEnabled = value
+        }
+
     // Unity側のGameObject名とメソッド名
     private var callbackGameObject: String = "HaishinKitManager"
     private var callbackMethodName: String = "OnNativeStatusCallback"
@@ -22,24 +31,28 @@ object UnityBridge {
     // HaishinKitUnityWrapperのインスタンス
     private var wrapper: HaishinKitUnityWrapper? = null
 
+    private fun debugLog(message: String) {
+        if (debugEnabled) Log.d(TAG, message)
+    }
+
     /**
      * Unity側から呼び出される初期化メソッド
      */
     @JvmStatic
     fun initialize(activity: Activity) {
-        Log.d(TAG, ">>> initialize called with activity: $activity")
+        debugLog("initialize called with activity: $activity")
         try {
             activityRef = WeakReference(activity)
-            Log.d(TAG, ">>> Creating HaishinKitUnityWrapper...")
             wrapper = HaishinKitUnityWrapper(activity).apply {
+                this.debugEnabled = this@UnityBridge.debugEnabled
                 setStatusCallback { status ->
-                    Log.d(TAG, ">>> Status callback: $status")
+                    debugLog("Status callback: $status")
                     sendMessageToUnity(status)
                 }
             }
-            Log.d(TAG, ">>> initialize completed successfully, wrapper=$wrapper")
+            debugLog("initialize completed successfully")
         } catch (e: Exception) {
-            Log.e(TAG, ">>> initialize FAILED: ${e.message}", e)
+            Log.e(TAG, "initialize FAILED: ${e.message}", e)
         }
     }
 
@@ -57,7 +70,6 @@ object UnityBridge {
      */
     private fun sendMessageToUnity(message: String) {
         try {
-            // UnityPlayerクラスをリフレクションで取得
             val unityPlayerClass = Class.forName("com.unity3d.player.UnityPlayer")
             val sendMessageMethod = unityPlayerClass.getMethod(
                 "UnitySendMessage",
@@ -77,7 +89,7 @@ object UnityBridge {
     @JvmStatic
     fun getVersion(): String {
         val version = wrapper?.getVersion() ?: "not initialized"
-        Log.d(TAG, ">>> getVersion: $version, wrapper=$wrapper")
+        debugLog("getVersion: $version")
         return version
     }
 
@@ -86,16 +98,15 @@ object UnityBridge {
      */
     @JvmStatic
     fun connect(url: String, streamName: String) {
-        Log.d(TAG, ">>> connect called: url=$url, streamName=$streamName, wrapper=$wrapper")
+        debugLog("connect called: url=$url, streamName=$streamName")
         if (wrapper == null) {
-            Log.e(TAG, ">>> connect FAILED: wrapper is null!")
+            Log.e(TAG, "connect FAILED: wrapper is null!")
             return
         }
         try {
             wrapper?.connect(url, streamName)
-            Log.d(TAG, ">>> connect call completed")
         } catch (e: Exception) {
-            Log.e(TAG, ">>> connect FAILED: ${e.message}", e)
+            Log.e(TAG, "connect FAILED: ${e.message}", e)
         }
     }
 
@@ -128,7 +139,7 @@ object UnityBridge {
      */
     @JvmStatic
     fun sendVideoFrame(pixels: ByteArray, width: Int, height: Int) {
-        Log.d(TAG, ">>> sendVideoFrame: ${pixels.size} bytes, ${width}x${height}")
+        debugLog("sendVideoFrame: ${pixels.size} bytes, ${width}x${height}")
         wrapper?.sendVideoFrame(pixels, width, height)
     }
 
@@ -150,7 +161,6 @@ object UnityBridge {
 
     /**
      * C++ Native Plugin Mode設定（Zero Copy via GL.IssuePluginEvent）
-     * This is the recommended approach for zero-copy texture sharing.
      */
     @JvmStatic
     fun setUseNativePlugin(enabled: Boolean) {
@@ -159,8 +169,6 @@ object UnityBridge {
 
     /**
      * Initialize the C++ Native Plugin with MediaCodec's input surface
-     * Must be called after videoCodec is initialized.
-     * @return true if initialization succeeded
      */
     @JvmStatic
     fun initializeNativePlugin(): Boolean {

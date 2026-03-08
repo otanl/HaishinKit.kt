@@ -28,6 +28,14 @@ class HaishinKitUnityWrapper(private val context: Context) {
         const val VERSION = "1.0.0"
     }
 
+    // デバッグログ制御
+    @Volatile
+    var debugEnabled: Boolean = false
+
+    private fun debugLog(message: String) {
+        if (debugEnabled) Log.d(TAG, message)
+    }
+
     // RTMP接続
     @Volatile
     private var connection: RtmpConnection? = null
@@ -51,17 +59,17 @@ class HaishinKitUnityWrapper(private val context: Context) {
 
     // Native Texture Rendering (zero-copy approach)
     @Volatile
-    private var useNativeTexture = false  // Disabled by default until proven working
+    private var useNativeTexture = false
     @Volatile
     private var nativeTextureRenderer: NativeTextureRenderer? = null
 
     // C++ Native Plugin for zero-copy texture sharing
     @Volatile
-    private var useNativePlugin = false  // Enabled via setUseNativePlugin()
+    private var useNativePlugin = false
     @Volatile
     private var nativePluginInitialized = false
 
-    // Bitmap再利用用（ソース用のみ、flippedはImageScreenObjectに渡して管理させる）
+    // Bitmap再利用用
     private var reusableBitmap: Bitmap? = null
 
     // オーディオエンジン
@@ -76,13 +84,12 @@ class HaishinKitUnityWrapper(private val context: Context) {
     // ステータスコールバック用
     private var statusCallback: ((String) -> Unit)? = null
 
-    // イベントリスナー（バックグラウンドスレッドから呼ばれる可能性があるため、メインスレッドにディスパッチ）
+    // イベントリスナー
     private val eventListener = object : IEventListener {
         override fun handleEvent(event: Event) {
             val data = EventUtils.toMap(event)
             val code = data["code"]?.toString() ?: return
 
-            // メインスレッドにディスパッチしてステータス通知とコルーチン操作を安全に実行
             scope.launch {
                 when (code) {
                     RtmpConnection.Code.CONNECT_SUCCESS.rawValue -> {
@@ -96,7 +103,6 @@ class HaishinKitUnityWrapper(private val context: Context) {
                     }
                     RtmpStream.Code.PUBLISH_START.rawValue -> {
                         notifyStatus("publishing")
-                        // 無音オーディオを開始
                         if (audioEngine.silentAudioEnabled && !audioEngine.useExternalAudio) {
                             audioEngine.startSilentAudio()
                         }
@@ -118,14 +124,12 @@ class HaishinKitUnityWrapper(private val context: Context) {
      * RTMPサーバーに接続
      */
     fun connect(url: String, streamName: String) {
-        Log.d(TAG, "connect: $url, $streamName")
+        debugLog("connect: $url, $streamName")
 
         scope.launch {
             try {
-                // 既存の接続をクリーンアップ
                 cleanup()
 
-                // 新しい接続を作成
                 connection = RtmpConnection().apply {
                     addEventListener(Event.RTMP_STATUS, eventListener)
                 }
@@ -134,10 +138,7 @@ class HaishinKitUnityWrapper(private val context: Context) {
                     addEventListener(Event.RTMP_STATUS, eventListener)
                 }
 
-                // ストリーム名を保存
                 this@HaishinKitUnityWrapper.streamName = streamName
-
-                // 接続
                 connection?.connect(url)
 
             } catch (e: Exception) {
@@ -151,7 +152,7 @@ class HaishinKitUnityWrapper(private val context: Context) {
      * 切断
      */
     fun disconnect() {
-        Log.d(TAG, "disconnect")
+        debugLog("disconnect")
 
         scope.launch {
             try {
@@ -168,14 +169,13 @@ class HaishinKitUnityWrapper(private val context: Context) {
      * テクスチャモードで配信開始
      */
     fun startPublishingWithTexture(width: Int, height: Int) {
-        Log.d(TAG, "startPublishingWithTexture: ${width}x${height}, useDirectSurface=$useDirectSurface")
+        debugLog("startPublishingWithTexture: ${width}x${height}, useDirectSurface=$useDirectSurface")
 
         isTextureMode = true
         videoWidth = width
         videoHeight = height
         frameCount = 0
 
-        // BitmapRendererをリセット（後で初期化）
         bitmapRenderer?.release()
         bitmapRenderer = null
 
@@ -186,21 +186,17 @@ class HaishinKitUnityWrapper(private val context: Context) {
                     return@launch
                 }
 
-                // ビデオ設定
                 rtmpStream.videoSetting.width = width
                 rtmpStream.videoSetting.height = height
                 rtmpStream.videoSetting.bitRate = 2_000_000
 
-                // オーディオ設定
                 rtmpStream.audioSetting.bitRate = 128_000
                 rtmpStream.audioSetting.sampleRate = audioEngine.sampleRate
                 rtmpStream.audioSetting.channelCount = audioEngine.channels
 
                 if (useDirectSurface) {
-                    // 直接Surface描画モード
                     rtmpStream.useExternalVideoInput = true
                 } else {
-                    // ImageScreenObject経由モード
                     rtmpStream.screen.frame = Rect(0, 0, width, height)
                     imageScreenObject = ImageScreenObject().apply {
                         frame = Rect(0, 0, width, height)
@@ -208,12 +204,10 @@ class HaishinKitUnityWrapper(private val context: Context) {
                     rtmpStream.screen.addChild(imageScreenObject!!)
                 }
 
-                // hasVideo/hasAudioを設定
                 val enableAudio = audioEngine.useExternalAudio || audioEngine.silentAudioEnabled
                 rtmpStream.hasVideo = true
                 rtmpStream.hasAudio = enableAudio
 
-                // 配信開始
                 rtmpStream.publish(this@HaishinKitUnityWrapper.streamName)
 
             } catch (e: Exception) {
@@ -227,7 +221,7 @@ class HaishinKitUnityWrapper(private val context: Context) {
      * 配信停止
      */
     fun stopPublishing() {
-        Log.d(TAG, "stopPublishing")
+        debugLog("stopPublishing")
 
         scope.launch {
             try {
@@ -254,46 +248,36 @@ class HaishinKitUnityWrapper(private val context: Context) {
 
     /**
      * ビデオフレームを送信（RGBA byte array）
-     * Unity側でRenderTexture.ReadPixelsで取得したデータを受け取る
      */
     fun sendVideoFrame(pixels: ByteArray, width: Int, height: Int) {
         if (frameCount < 5) {
-            Log.d(TAG, "sendVideoFrame called: ${pixels.size} bytes, ${width}x${height}, isTextureMode=$isTextureMode, useDirectSurface=$useDirectSurface")
+            debugLog("sendVideoFrame: ${pixels.size} bytes, ${width}x${height}")
         }
-        if (!isTextureMode) {
-            Log.w(TAG, "sendVideoFrame: not in texture mode, returning")
-            return
-        }
+        if (!isTextureMode) return
 
         try {
-            // Bitmapを再利用または作成
             if (reusableBitmap == null || reusableBitmap!!.width != width || reusableBitmap!!.height != height) {
-                Log.d(TAG, "sendVideoFrame: creating new bitmap ${width}x${height}")
+                debugLog("sendVideoFrame: creating new bitmap ${width}x${height}")
                 reusableBitmap?.recycle()
                 reusableBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
             }
 
-            // byte配列からBitmapにコピー
             val buffer = ByteBuffer.wrap(pixels)
             reusableBitmap!!.copyPixelsFromBuffer(buffer)
 
             if (useDirectSurface) {
-                // シンプルなアーキテクチャ：直接Surface描画
                 if (frameCount < 5) {
-                    val rtmpStream = stream
-                    val inputSurface = rtmpStream?.videoCodec?.inputSurface
-                    Log.d(TAG, "sendVideoFrame: useDirectSurface=true, stream=$rtmpStream, inputSurface=$inputSurface")
+                    debugLog("sendVideoFrame: useDirectSurface=true, stream=$stream, inputSurface=${stream?.videoCodec?.inputSurface}")
                 }
                 drawBitmapToSurface(reusableBitmap!!)
             } else {
-                // 従来のアーキテクチャ：ImageScreenObject経由
                 val flipped = flipBitmapVertically(reusableBitmap!!)
                 imageScreenObject?.bitmap = flipped
             }
 
             frameCount++
             if (frameCount <= 5 || frameCount % 100 == 0) {
-                Log.d(TAG, "sendVideoFrame: frame #$frameCount processed")
+                debugLog("sendVideoFrame: frame #$frameCount processed")
             }
 
         } catch (e: Exception) {
@@ -302,7 +286,7 @@ class HaishinKitUnityWrapper(private val context: Context) {
     }
 
     /**
-     * BitmapをMediaCodecの入力Surfaceに直接描画（OpenGL ES使用）
+     * BitmapをMediaCodecの入力Surfaceに直接描画
      */
     private fun drawBitmapToSurface(bitmap: Bitmap) {
         val rtmpStream = stream ?: return
@@ -322,19 +306,17 @@ class HaishinKitUnityWrapper(private val context: Context) {
             return
         }
 
-        // BitmapRendererを初期化（初回のみ）
         if (bitmapRenderer == null) {
-            Log.d(TAG, "drawBitmapToSurface: initializing BitmapRenderer")
+            debugLog("drawBitmapToSurface: initializing BitmapRenderer")
             bitmapRenderer = BitmapRenderer()
             if (!bitmapRenderer!!.initialize(inputSurface, videoWidth, videoHeight)) {
                 Log.e(TAG, "drawBitmapToSurface: BitmapRenderer initialization failed")
                 bitmapRenderer = null
                 return
             }
-            Log.d(TAG, "drawBitmapToSurface: BitmapRenderer initialized successfully")
+            debugLog("drawBitmapToSurface: BitmapRenderer initialized successfully")
         }
 
-        // OpenGL ESでBitmapを描画
         if (!bitmapRenderer!!.drawBitmap(bitmap)) {
             if (frameCount < 10) {
                 Log.w(TAG, "drawBitmapToSurface: drawBitmap failed")
@@ -344,22 +326,13 @@ class HaishinKitUnityWrapper(private val context: Context) {
 
     /**
      * ビデオフレームを送信（Native OpenGL Texture - Zero Copy）
-     *
-     * @param textureId Unity's OpenGL texture ID from GetNativeTexturePtr()
-     * @param width Texture width
-     * @param height Texture height
-     *
-     * Note: This requires Unity to use OpenGL ES backend (not Vulkan)
      */
     fun sendVideoFrameNativeTexture(textureId: Int, width: Int, height: Int) {
         if (frameCount < 5) {
-            Log.d(TAG, "sendVideoFrameNativeTexture: textureId=$textureId, ${width}x${height}, isTextureMode=$isTextureMode")
+            debugLog("sendVideoFrameNativeTexture: textureId=$textureId, ${width}x${height}")
         }
 
-        if (!isTextureMode) {
-            Log.w(TAG, "sendVideoFrameNativeTexture: not in texture mode")
-            return
-        }
+        if (!isTextureMode) return
 
         try {
             val rtmpStream = stream ?: return
@@ -379,19 +352,17 @@ class HaishinKitUnityWrapper(private val context: Context) {
                 return
             }
 
-            // Initialize NativeTextureRenderer if needed
             if (nativeTextureRenderer == null) {
-                Log.d(TAG, "sendVideoFrameNativeTexture: initializing NativeTextureRenderer")
+                debugLog("sendVideoFrameNativeTexture: initializing NativeTextureRenderer")
                 nativeTextureRenderer = NativeTextureRenderer()
                 if (!nativeTextureRenderer!!.initialize(inputSurface, width, height)) {
                     Log.e(TAG, "sendVideoFrameNativeTexture: NativeTextureRenderer initialization failed")
                     nativeTextureRenderer = null
                     return
                 }
-                Log.d(TAG, "sendVideoFrameNativeTexture: NativeTextureRenderer initialized successfully")
+                debugLog("sendVideoFrameNativeTexture: NativeTextureRenderer initialized successfully")
             }
 
-            // Render the texture
             if (!nativeTextureRenderer!!.renderTexture(textureId)) {
                 if (frameCount < 10) {
                     Log.w(TAG, "sendVideoFrameNativeTexture: renderTexture failed")
@@ -400,7 +371,7 @@ class HaishinKitUnityWrapper(private val context: Context) {
 
             frameCount++
             if (frameCount <= 5 || frameCount % 100 == 0) {
-                Log.d(TAG, "sendVideoFrameNativeTexture: frame #$frameCount processed")
+                debugLog("sendVideoFrameNativeTexture: frame #$frameCount processed")
             }
 
         } catch (e: Exception) {
@@ -412,27 +383,23 @@ class HaishinKitUnityWrapper(private val context: Context) {
      * Enable/disable native texture mode (zero-copy)
      */
     fun setUseNativeTexture(enabled: Boolean) {
-        Log.d(TAG, "setUseNativeTexture: $enabled (was $useNativeTexture)")
+        debugLog("setUseNativeTexture: $enabled (was $useNativeTexture)")
         useNativeTexture = enabled
     }
 
     /**
      * Enable/disable C++ Native Plugin mode (zero-copy via GL.IssuePluginEvent)
-     * This is the recommended approach for zero-copy texture sharing.
      */
     fun setUseNativePlugin(enabled: Boolean) {
-        Log.d(TAG, "setUseNativePlugin: $enabled (was $useNativePlugin)")
+        debugLog("setUseNativePlugin: $enabled (was $useNativePlugin)")
         useNativePlugin = enabled
         if (enabled) {
-            // Disable old native texture mode
             useNativeTexture = false
         }
     }
 
     /**
      * Initialize the C++ Native Plugin with the MediaCodec's input surface
-     * This should be called after videoCodec is initialized.
-     * Called from Unity's render thread initialization.
      */
     fun initializeNativePlugin(): Boolean {
         if (!useNativePlugin) {
@@ -448,7 +415,7 @@ class HaishinKitUnityWrapper(private val context: Context) {
 
         val inputSurface = rtmpStream.videoCodec.inputSurface
         if (inputSurface == null) {
-            Log.w(TAG, "initializeNativePlugin: inputSurface is null, videoCodec may not be ready")
+            Log.w(TAG, "initializeNativePlugin: inputSurface is null")
             return false
         }
 
@@ -457,14 +424,11 @@ class HaishinKitUnityWrapper(private val context: Context) {
             return false
         }
 
-        // Initialize the native plugin
         NativeTexturePlugin.initialize()
-
-        // Pass the surface to the native plugin
         NativeTexturePlugin.setSurface(inputSurface, videoWidth, videoHeight)
 
         nativePluginInitialized = true
-        Log.d(TAG, "initializeNativePlugin: success, surface=${inputSurface}, size=${videoWidth}x${videoHeight}")
+        debugLog("initializeNativePlugin: success, size=${videoWidth}x${videoHeight}")
 
         return true
     }
@@ -484,10 +448,8 @@ class HaishinKitUnityWrapper(private val context: Context) {
 
         try {
             if (useDirectSurface) {
-                // シンプルなアーキテクチャ：直接Surface描画
                 drawBitmapToSurface(bitmap)
             } else {
-                // 従来のアーキテクチャ：ImageScreenObject経由
                 val flippedBitmap = flipBitmapVertically(bitmap)
                 imageScreenObject?.bitmap = flippedBitmap
             }
@@ -499,10 +461,6 @@ class HaishinKitUnityWrapper(private val context: Context) {
 
     /**
      * オーディオフレームを送信
-     * @param samples インターリーブされたFloat32 PCMサンプル
-     * @param sampleCount サンプル数（チャンネルあたり）
-     * @param channels チャンネル数
-     * @param sampleRate サンプルレート
      */
     fun sendAudioFrame(samples: FloatArray, sampleCount: Int, channels: Int, sampleRate: Int) {
         if (!isTextureMode) return
@@ -511,7 +469,6 @@ class HaishinKitUnityWrapper(private val context: Context) {
 
     /**
      * オーディオフレームを送信（byte配列版）
-     * @param samples Int16 PCMサンプル（バイト配列）
      */
     fun sendAudioFrameBytes(samples: ByteArray) {
         if (!isTextureMode) return
@@ -527,7 +484,6 @@ class HaishinKitUnityWrapper(private val context: Context) {
 
     /**
      * オーディオサンプルレートを設定
-     * Unityの実際のサンプルレート（AudioSettings.outputSampleRate）を設定する
      */
     fun setAudioSampleRate(sampleRate: Int) {
         audioEngine.setSampleRate(sampleRate)
@@ -535,13 +491,10 @@ class HaishinKitUnityWrapper(private val context: Context) {
 
     /**
      * 直接Surface描画モードを設定
-     * true: シンプルなアーキテクチャ（Bitmap → Surface → MediaCodec）
-     * false: 従来のアーキテクチャ（Bitmap → ImageScreenObject → Screen → PixelTransform → MediaCodec）
-     * デフォルトはtrue
      */
     fun setUseDirectSurface(enabled: Boolean) {
         useDirectSurface = enabled
-        Log.d(TAG, "setUseDirectSurface: $enabled")
+        debugLog("setUseDirectSurface: $enabled")
     }
 
     /**
@@ -569,9 +522,8 @@ class HaishinKitUnityWrapper(private val context: Context) {
      * クリーンアップ
      */
     fun cleanup() {
-        Log.d(TAG, "cleanup called")
+        debugLog("cleanup called")
 
-        // オーディオエンジンをクリーンアップ
         audioEngine.cleanup()
 
         if (!useDirectSurface) {
@@ -585,7 +537,6 @@ class HaishinKitUnityWrapper(private val context: Context) {
         nativeTextureRenderer?.release()
         nativeTextureRenderer = null
 
-        // Cleanup C++ Native Plugin
         if (nativePluginInitialized) {
             NativeTexturePlugin.cleanup()
             nativePluginInitialized = false
@@ -595,7 +546,6 @@ class HaishinKitUnityWrapper(private val context: Context) {
         isTextureMode = false
         frameCount = 0
 
-        // Bitmapをリサイクル
         reusableBitmap?.recycle()
         reusableBitmap = null
 
@@ -609,14 +559,13 @@ class HaishinKitUnityWrapper(private val context: Context) {
 
     /**
      * ステータスコールバックを設定
-     * Unity側でUnitySendMessageを使用してコールバックを受け取る
      */
     fun setStatusCallback(callback: (String) -> Unit) {
         statusCallback = callback
     }
 
     private fun notifyStatus(status: String) {
-        Log.d(TAG, "Status: $status")
+        debugLog("Status: $status")
         statusCallback?.invoke(status)
     }
 

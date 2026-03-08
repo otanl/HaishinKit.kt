@@ -23,6 +23,14 @@ class AudioEngine(
         private const val SILENT_AUDIO_INTERVAL_MS = 23L
     }
 
+    // デバッグログ制御
+    @Volatile
+    var debugEnabled: Boolean = false
+
+    private fun debugLog(message: String) {
+        if (debugEnabled) Log.d(TAG, message)
+    }
+
     // 設定
     @Volatile
     var sampleRate: Int = DEFAULT_SAMPLE_RATE
@@ -60,7 +68,7 @@ class AudioEngine(
      * サンプルレートを設定
      */
     fun setSampleRate(rate: Int) {
-        Log.d(TAG, "setSampleRate: $rate (was $sampleRate)")
+        debugLog("setSampleRate: $rate (was $sampleRate)")
         sampleRate = rate
         streamProvider()?.audioSetting?.sampleRate = rate
     }
@@ -69,7 +77,7 @@ class AudioEngine(
      * 外部オーディオの使用を設定
      */
     fun setUseExternalAudio(enabled: Boolean) {
-        Log.d(TAG, "setUseExternalAudio: $enabled (was $useExternalAudio)")
+        debugLog("setUseExternalAudio: $enabled (was $useExternalAudio)")
         useExternalAudio = enabled
         if (enabled) {
             stopSilentAudio()
@@ -94,16 +102,15 @@ class AudioEngine(
      */
     fun startSilentAudio() {
         if (!silentAudioRunning.compareAndSet(false, true)) {
-            return  // 既に実行中
+            return
         }
 
-        Log.d(TAG, "Starting silent audio thread")
+        debugLog("Starting silent audio thread")
 
         silentAudioThread = Thread {
             val samplesPerBuffer = AAC_SAMPLES_PER_FRAME
-            val bufferSize = samplesPerBuffer * channels * 2 // 16-bit PCM
+            val bufferSize = samplesPerBuffer * channels * 2
 
-            // AudioCodecが準備されるまで待機
             try {
                 Thread.sleep(100)
             } catch (e: InterruptedException) {
@@ -119,7 +126,6 @@ class AudioEngine(
                         val silentBuffer = ByteBuffer.allocateDirect(bufferSize)
                             .order(ByteOrder.nativeOrder())
 
-                        // 無音で埋める
                         repeat(samplesPerBuffer * channels) {
                             silentBuffer.putShort(0)
                         }
@@ -137,7 +143,7 @@ class AudioEngine(
                             rtmpStream.append(mediaBuffer)
                             audioFrameCount++
                             if (audioFrameCount <= 5 || audioFrameCount % 100 == 0) {
-                                Log.d(TAG, "Silent audio frame #$audioFrameCount sent")
+                                debugLog("Silent audio frame #$audioFrameCount sent")
                             }
                         } catch (e: Exception) {
                             Log.w(TAG, "Silent audio append failed: ${e.message}")
@@ -146,7 +152,7 @@ class AudioEngine(
 
                     Thread.sleep(SILENT_AUDIO_INTERVAL_MS)
                 } catch (e: InterruptedException) {
-                    Log.d(TAG, "Silent audio thread interrupted")
+                    debugLog("Silent audio thread interrupted")
                     break
                 } catch (e: Exception) {
                     Log.e(TAG, "Silent audio error", e)
@@ -158,7 +164,7 @@ class AudioEngine(
                 }
             }
             silentAudioRunning.set(false)
-            Log.d(TAG, "Silent audio thread stopped")
+            debugLog("Silent audio thread stopped")
         }.apply {
             name = "SilentAudioThread"
             start()
@@ -176,15 +182,11 @@ class AudioEngine(
 
     /**
      * オーディオフレームを送信（Float配列版）
-     * @param samples インターリーブされたFloat32 PCMサンプル
-     * @param sampleCount サンプル数（チャンネルあたり）
-     * @param channels チャンネル数
-     * @param sampleRate サンプルレート
      */
     fun sendAudioFrame(samples: FloatArray, sampleCount: Int, channels: Int, sampleRate: Int): Boolean {
         sendAudioFrameCallCount++
         if (sendAudioFrameCallCount <= 10 || sendAudioFrameCallCount % 200 == 0) {
-            Log.d(TAG, "sendAudioFrame #$sendAudioFrameCallCount: sampleCount=$sampleCount, channels=$channels")
+            debugLog("sendAudioFrame #$sendAudioFrameCallCount: sampleCount=$sampleCount, channels=$channels")
         }
 
         if (!useExternalAudio) {
@@ -194,12 +196,11 @@ class AudioEngine(
         val rtmpStream = streamProvider() ?: return false
 
         try {
-            // 蓄積バッファを初期化
             val targetSamples = AAC_SAMPLES_PER_FRAME * channels
             if (audioAccumulationBuffer == null || audioAccumulationBuffer!!.size != targetSamples) {
                 audioAccumulationBuffer = FloatArray(targetSamples)
                 audioAccumulationIndex = 0
-                Log.d(TAG, "Audio accumulation buffer initialized: targetSamples=$targetSamples")
+                debugLog("Audio accumulation buffer initialized: targetSamples=$targetSamples")
             }
 
             val actualSampleCount = sampleCount * channels
@@ -211,7 +212,6 @@ class AudioEngine(
                 audioAccumulationIndex += toCopy
                 inputIndex += toCopy
 
-                // バッファが満杯になったら送信
                 if (audioAccumulationIndex >= targetSamples) {
                     sendAccumulatedAudioFrame(rtmpStream, channels, sampleRate)
                     audioAccumulationIndex = 0
@@ -240,11 +240,13 @@ class AudioEngine(
         }
         sendBuffer.flip()
 
+        val elapsedMicroseconds = externalAudioSampleCount * 1_000_000L / sampleRate
+
         val mediaBuffer = MediaBuffer(
             type = MediaType.AUDIO,
             index = 0,
             payload = sendBuffer,
-            timestamp = 0,  // AudioCodecBufferで管理
+            timestamp = elapsedMicroseconds,
             sync = false
         )
 
@@ -254,13 +256,12 @@ class AudioEngine(
         externalAudioFrameCount++
 
         if (externalAudioFrameCount <= 10 || externalAudioFrameCount % 100 == 0) {
-            Log.d(TAG, "External audio frame #$externalAudioFrameCount sent, samples=$AAC_SAMPLES_PER_FRAME")
+            debugLog("External audio frame #$externalAudioFrameCount sent")
         }
     }
 
     /**
      * オーディオフレームを送信（バイト配列版）
-     * @param samples Int16 PCMサンプル（バイト配列）
      */
     fun sendAudioFrameBytes(samples: ByteArray): Boolean {
         if (!useExternalAudio) return false
